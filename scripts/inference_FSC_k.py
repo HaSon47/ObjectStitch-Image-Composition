@@ -438,6 +438,12 @@ def argument_parse():
         default=321,
         help="the seed (for reproducible sampling)",
     )
+    parser.add_argument(
+        "--K",
+        type=int,
+        default=3,
+        help="number of objects want to insert",
+    )
     opt = parser.parse_args()
     return opt
 
@@ -497,7 +503,7 @@ if __name__ == "__main__":
         if not os.path.exists(img_folder_path):
             img_folder_path = os.path.join(opt.rootpath, 'val', img_name.split('.')[0])
         
-        batch = generate_image_batch(img_folder_path)
+        batch = generate_image_batch(img_folder_path, opt.K)
 
         # nếu ảnh chỉ có 1 mask, thì next
         if not batch:
