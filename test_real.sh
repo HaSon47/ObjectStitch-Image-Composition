@@ -7,20 +7,13 @@
 # --num_samples 3 \
 # --sample_steps 45 \
 # --gpu 2
-python scripts/inference_location.py \
---outdir /workdir/radish/hachi/Output/Location_phase1/ObjectStitch/ \
---testdir /workdir/radish/hachi/Data/Location/Location_with_anno_test \
+python scripts/inference_real.py \
+--outdir /workdir/radish/hachi/Output/Location_real_add/ObjStitch/difficult \
+--testdir /workdir/radish/hachi/OBJ_INS/Real/Real_difficult \
+--locationdir /workdir/radish/hachi/Data/box_results/difficult \
 --rootpath /workdir/radish/hachi/OBJ_INS/phase2_V2 \
 --ckpt_dir ./checkpoints \
+--ckpt_objstit /home/hachi/ObjectStitch-Image-Composition/checkpoints/ObjectStitch.pth \
 --num_samples 3 \
---sample_steps 35 \
---gpu 2 \
---turn 1 
-
-# python scripts/inference.py \
-# --outdir results \
-# --testdir examples \
-# --num_samples 3 \
-# --sample_steps 50 \
-# --plms \
-# --gpu 0
+--sample_steps 45 \
+--gpu 3 \

@@ -120,6 +120,31 @@ class DataAugmentation:
                           p=1)],
             # additional_targets={'image':'image', 'image1':'image', 'image2':'image'}
             )
+        # self.appearance_trans = A.Compose([
+        #     A.HueSaturationValue(
+        #         hue_shift_limit=int(0.05 * 180),  # hue in degrees, 0.05 * 180 = 9
+        #         sat_shift_limit=int(0.3 * 255),   # saturation 0-255 range
+        #         val_shift_limit=int(0.3 * 255),   # value/brightness 0-255 range
+        #         always_apply=False,
+        #         p=1
+        #     ),
+        #     A.RandomBrightnessContrast(
+        #         brightness_limit=0.3,
+        #         contrast_limit=0.3,
+        #         always_apply=False,
+        #         p=1
+        #     )
+        # ])
+        self.fg_geometric_trans = A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.Rotate(
+                limit=20,
+                border_mode=border_mode,
+                value=0,          # ảnh fg đen -> pad 0 là hợp lý
+                mask_value=0,
+                p=1.0
+            ),
+        ])
         self.geometric_trans = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.Rotate(limit=20,
@@ -137,7 +162,7 @@ class DataAugmentation:
         self.bbox_maxlen = 0.8
         self.crop_bg_p  = 0.5
     
-    def __call__(self, bg_img, bbox, bg_mask, fg_img, fg_mask):
+    def __call__(self, bg_img, bbox, bg_mask, fg_img, fg_mask, use_black_fg=False):
         # randomly crop background image
         if self.crop_bg_p > 0 and np.random.rand() < self.crop_bg_p:
             trans_bg, trans_bbox, trans_mask = self.random_crop_background(bg_img, bbox, bg_mask)
@@ -146,7 +171,10 @@ class DataAugmentation:
         
         bbox_mask = bbox2mask(trans_bbox, trans_bg.shape[1], trans_bg.shape[0])
         # perform illumination and pose transformation on foreground
-        trans_fg, trans_fgmask = self.augment_foreground(fg_img.copy(), fg_mask.copy())
+        if use_black_fg:
+            trans_fg, trans_fgmask = self.augment_foreground_black(fg_img.copy(), fg_mask.copy())
+        else:
+            trans_fg, trans_fgmask = self.augment_foreground(fg_img.copy(), fg_mask.copy())
         return {"bg_img":   trans_bg,
                 "bg_mask":  trans_mask,
                 "bbox":     trans_bbox,
@@ -162,6 +190,15 @@ class DataAugmentation:
         transformed = self.geometric_trans(image=img, mask=mask)
         trans_img  = transformed['image']
         trans_mask = transformed['mask']
+        return trans_img, trans_mask
+    
+    def augment_foreground_black(self, img, mask):
+        # img đầu vào không còn quan trọng; chỉ cần giữ shape cùng kích thước
+        transformed = self.fg_geometric_trans(image=img, mask=mask)
+        trans_mask = transformed["mask"]
+
+        # Tạo fg_img full đen đúng shape sau transform
+        trans_img = np.zeros_like(transformed["image"], dtype=np.uint8)
         return trans_img, trans_mask
 
     def random_crop_background(self, image, bbox, mask):
@@ -347,10 +384,10 @@ class OpenImageDataset(data.Dataset):
         self.split=split
         dataset_dir = args['dataset_dir']
         assert os.path.exists(dataset_dir), dataset_dir
-        self.bbox_dir = check_dir(os.path.join(dataset_dir, 'refine/box', split))
+        self.bbox_dir = check_dir(os.path.join(dataset_dir, 'box', split))
         self.image_dir= check_dir(os.path.join(dataset_dir, 'images', split))
-        self.inpaint_dir = check_dir(os.path.join(dataset_dir, 'refine/inpaint', split))
-        self.mask_dir = check_dir(os.path.join(dataset_dir, 'refine/mask', split))
+        self.inpaint_dir = check_dir(os.path.join(dataset_dir, 'inpaint', split))
+        self.mask_dir = check_dir(os.path.join(dataset_dir, 'mask', split))
         self.bbox_path_list = np.array(self.load_bbox_path_list())
         self.length=len(self.bbox_path_list)
         self.random_trans = DataAugmentation()
@@ -360,6 +397,8 @@ class OpenImageDataset(data.Dataset):
         self.mask_transform = get_tensor(normalize=False, image_size=self.image_size)
         self.clip_mask_transform = get_tensor(normalize=False, image_size=(224, 224))
         self.bad_images = []
+        self.use_black_fg = args.get("use_black_fg", False)
+        self.p_use_black_fg = args["p_use_black_fg"]
     
     def load_bbox_path_list(self):
         # cache_dir  = os.path.dirname(os.path.abspath(self.bbox_dir))
@@ -384,14 +423,14 @@ class OpenImageDataset(data.Dataset):
                 info  = line.strip().split(' ')
                 bbox  = [int(float(f)) for f in info[:4]]
                 mask  = os.path.join(self.mask_dir, info[-1])
-                inpaint = os.path.join(self.inpaint_dir, info[-1].replace('.png', '.jpg'))
+                inpaint = os.path.join(self.inpaint_dir, info[-1])
                 if os.path.exists(mask) and os.path.exists(inpaint):
                     bbox_list.append((bbox, mask, inpaint))
         return bbox_list
 
     
-    def sample_augmented_data(self, source_np, bbox, mask, fg_img, fg_mask):
-        transformed = self.random_trans(source_np, bbox, mask, fg_img, fg_mask)
+    def sample_augmented_data(self, source_np, bbox, mask, fg_img, fg_mask, use_black_fg):
+        transformed = self.random_trans(source_np, bbox, mask, fg_img, fg_mask, use_black_fg=use_black_fg)
         # get ground-truth composite image and bbox
         gt_mask = Image.fromarray(transformed["bg_mask"])
         img_width, img_height = gt_mask.size
@@ -411,8 +450,13 @@ class OpenImageDataset(data.Dataset):
         fg_mask_tensor = self.clip_mask_transform(fg_mask_tensor)
         fg_mask_tensor = torch.where(fg_mask_tensor > 0.5, 1, 0)
         
-        fg_img_tensor = transformed['fg_img'] * (transformed['fg_mask'][:,:,None] > 0.5)
-        fg_img_tensor = Image.fromarray(fg_img_tensor)
+        if use_black_fg:
+            fg_img_np = np.zeros_like(transformed['fg_img'])
+
+        else:
+            fg_img_np = transformed['fg_img'] * (transformed['fg_mask'][:,:,None] > 0.5)
+        
+        fg_img_tensor = Image.fromarray(fg_img_np)
         fg_img_tensor = self.clip_transform(fg_img_tensor)
         inpaint = gt_img_tensor * (mask_tensor < 0.5)
         
@@ -426,13 +470,22 @@ class OpenImageDataset(data.Dataset):
     
     def __getitem__(self, index):
         try:
+            if self.use_black_fg:
+                r = np.random.rand()
+                if r < self.p_use_black_fg:
+                    use_black_fg = True
+                else:
+                    use_black_fg = False
             # get bbox and mask
             bbox_file  = self.bbox_path_list[index] 
             bbox_path  = os.path.join(self.bbox_dir, bbox_file)
             bbox_list  = self.load_bbox_file(bbox_path)
             bbox,mask_path,inpaint_path = random.choice(bbox_list)
             # get source image and mask
-            image_path = os.path.join(self.image_dir, os.path.splitext(bbox_file)[0] + '.jpg')
+            if use_black_fg:
+                image_path = os.path.join(self.image_dir, os.path.splitext(bbox_file)[0] + '.png')
+            else:
+                image_path = os.path.join(self.inpaint_dir, os.path.splitext(bbox_file)[0] + '.png')
             source_img  = read_image(image_path)
             source_img, bbox = rescale_image_with_bbox(source_img, bbox)
             source_np   = np.array(source_img)
@@ -440,8 +493,8 @@ class OpenImageDataset(data.Dataset):
             mask = mask.resize((source_np.shape[1], source_np.shape[0]))
             mask = np.array(mask)
             # bbox = mask2bbox(mask)
-            fg_img, fg_mask, bbox  = crop_foreground_by_bbox(source_np, mask, bbox)
-            sample = self.sample_augmented_data(source_np, bbox, mask, fg_img, fg_mask)
+            fg_img, fg_mask, bbox  = crop_foreground_by_bbox(source_np, mask, bbox, pad_bbox=1)
+            sample = self.sample_augmented_data(source_np, bbox, mask, fg_img, fg_mask, use_black_fg)
             sample['image_path'] = image_path
             return sample
         except Exception as e:
@@ -655,9 +708,9 @@ def test_open_images():
     from omegaconf import OmegaConf
     from ldm.util import instantiate_from_config
     from torch.utils.data import DataLoader
-    cfg_path = os.path.join(proj_dir, 'configs/v1.yaml')
+    cfg_path = os.path.join(proj_dir, 'configs/train.yaml')
     configs  = OmegaConf.load(cfg_path).data.params.train
-    configs.params.split = 'validation'
+    configs.params.split = 'val'
     dataset  = instantiate_from_config(configs)
     bs = 4
     dataloader = DataLoader(dataset=dataset, 
@@ -720,9 +773,9 @@ def test_open_images_efficiency():
         
 if __name__ == '__main__':
     # test_mask_blur_batch()
-    # test_open_images()
+    test_open_images()
     # test_open_images_efficiency()
     # test_cocoee_dataset()
-    test_fos_dataset()
+    # test_fos_dataset()
 
 
