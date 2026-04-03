@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug FSC Inference (composition)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/mnt/disk1/aiotlab/envs/composition/bin/python",
+            "program": "${workspaceFolder}/scripts/inference_FSC_k_loop.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2"
+            },
+            "args": [
+                "--outdir",
+                "/mnt/disk2/hachi/Output/tmp",
+                "--testdir",
+                "/mnt/disk2/hachi/data/FSC_final/FSC_difficult_no_overlap",
+                "--rootpath",
+                "/mnt/disk2/hachi/data/workdir/radish/hachi/OBJ_INS/phase2_V2",
+                "--ckpt_dir",
+                "/mnt/disk2/hachi/checkpoints",
+                "--num_samples",
+                "3",
+                "--sample_steps",
+                "45"
+            ]
+        }
+    ]
+}

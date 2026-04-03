@@ -1,4 +1,4 @@
-import argparse, os, sys, glob, json
+import argparse, os, sys, glob, json, random
 import cv2
 import torch
 import torch.nn.functional as F
@@ -10,13 +10,8 @@ from itertools import islice
 from einops import rearrange
 import time
 from pytorch_lightning import seed_everything
-try:
-    from lightning_fabric.utilities.seed import log
-    log.propagate = False
-except:
-    pass
 from torch import device
-import torchvision
+from torchvision.utils import save_image
 
 proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(proj_dir)
@@ -76,63 +71,8 @@ def get_background(bg_path, loc_bbox):
         - new_loc_bbox: list [x1, y1, x2, y2] in resized image
     """
     img = Image.open(bg_path).convert("RGB")
-    W, H = img.size
 
-    x1, y1, x2, y2 = loc_bbox
-    assert x2 > x1 and y2 > y1, "Invalid bbox"
-
-    # ---- Step 1: largest possible square ----
-    square_size = min(W, H)
-
-    # bbox center
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-
-    # initial crop (centered at bbox)
-    crop_x1 = int(cx - square_size / 2)
-    crop_y1 = int(cy - square_size / 2)
-    crop_x2 = crop_x1 + square_size
-    crop_y2 = crop_y1 + square_size
-
-    # ---- Step 2: clamp to image boundary ----
-    if crop_x1 < 0:
-        crop_x1 = 0
-        crop_x2 = square_size
-    if crop_y1 < 0:
-        crop_y1 = 0
-        crop_y2 = square_size
-    if crop_x2 > W:
-        crop_x2 = W
-        crop_x1 = W - square_size
-    if crop_y2 > H:
-        crop_y2 = H
-        crop_y1 = H - square_size
-
-    # ---- Step 3: crop ----
-    cropped_img = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
-
-    # ---- Step 4: bbox in cropped image ----
-    new_x1 = x1 - crop_x1
-    new_y1 = y1 - crop_y1
-    new_x2 = x2 - crop_x1
-    new_y2 = y2 - crop_y1
-
-    # ---- Step 5: resize ----
-    target_size = 512
-    scale = target_size / square_size
-
-    resized_img = cropped_img.resize(
-        (target_size, target_size), Image.BILINEAR
-    )
-
-    new_loc_bbox = [
-        int(new_x1 * scale),
-        int(new_y1 * scale),
-        int(new_x2 * scale),
-        int(new_y2 * scale),
-    ]
-
-    return resized_img, new_loc_bbox
+    return img, loc_bbox
 
 
 def get_foreground(fg_path, fg_mask_path, exam_bbox):
@@ -183,25 +123,50 @@ def get_foreground(fg_path, fg_mask_path, exam_bbox):
 
     return fg_crop, mask_crop
 
+def expand_bbox_xyxy(bbox, img_width, img_height, scale=0.05):
+    """
+    Expand bbox (xyxy) by a ratio.
 
-def generate_image_batch(img_folder_path):
+    Args:
+        bbox: [x1, y1, x2, y2]
+        img_width: image width
+        img_height: image height
+        scale: expansion ratio (0.1 = expand 10% each side)
+
+    Returns:
+        Expanded bbox in xyxy format
+    """
+    x1, y1, x2, y2 = bbox
+
+    w = x2 - x1
+    h = y2 - y1
+
+    dw = w * scale
+    dh = h * scale
+
+    new_x1 = max(0, x1 - dw)
+    new_y1 = max(0, y1 - dh)
+    new_x2 = min(img_width, x2 + dw)
+    new_y2 = min(img_height, y2 + dh)
+
+    return [int(new_x1), int(new_y1), int(new_x2), int(new_y2)]
+
+def generate_image_batch(input):
     #bg_path = os.path.join(img_folder_path, 'ground_truth.jpg')
-    bg_path = os.path.join(img_folder_path, 'inpainted_turn_1.png')
-    fg_path = bg_path
-    fg_mask_path = os.path.join(img_folder_path, 'mask_2.png')
-    anno_path = os.path.join(img_folder_path, 'annotation.json')
-    with open(anno_path, 'r') as f:
-        anno = json.load(f)
-    # chỉ lấy các trường hợp có hơn 2 mask obj
-    if len(anno["inpainted_bboxes"])<=1:
-        return None
+    bg_path = input["bg_path"]
+    fg_path = input["fg_path"]
+    fg_mask_path = input["exam_mask_path"]
+
     # get location bbox
-    loc_bbox = anno["inpainted_bboxes"][0]
+    loc_bbox = input["loc_bbox"]
     # get examplar bbox
-    exam_bbox = anno["inpainted_bboxes"][1]
+    exam_bbox = input["exam_bbox"]
 
     bg_img, bbox = get_background(bg_path, loc_bbox)
     bg_w, bg_h = bg_img.size
+
+    bbox = expand_bbox_xyxy(bbox, bg_w, bg_h)
+    exam_bbox = expand_bbox_xyxy(exam_bbox, bg_w, bg_h)
     bg_t       = sd_transform(bg_img)
 
     fg_img, fg_mask = get_foreground(fg_path, fg_mask_path, exam_bbox)
@@ -221,8 +186,48 @@ def generate_image_batch(img_folder_path):
     return {"bg_img":  inpaint_t.unsqueeze(0),
             "bg_mask": mask_t.unsqueeze(0),
             "fg_img":  fg_t.unsqueeze(0),
-            "bbox":    bbox_t.unsqueeze(0)
+            "bbox":    bbox_t.unsqueeze(0),
+            "origin_size": (bg_w, bg_h)
             }
+
+def get_inputs(testdir, root_path="/mnt/disk2/hachi/data/workdir/radish/hachi/OBJ_INS/phase2_V2"):
+    inputs = []
+    img_test_path = os.path.join(testdir, "Image")
+    anno_class_test_path = os.path.join(testdir, "Anno")
+    
+    for file in tqdm(os.listdir(anno_class_test_path)):
+        # get turn_i and img_folder name
+        anno_class_path = os.path.join(anno_class_test_path, file)
+        with open(anno_class_path, 'r') as f:
+            anno_class = json.load(f)
+        # get loc bbox
+        loc_bbox = anno_class["pred_box"]
+        img_folder = file.split('.')[0]
+        # get exam bbox and exam mask
+        anno_folder_path = os.path.join(root_path, "test", img_folder, "annotation.json")
+        fg_path = os.path.join(root_path, "test", img_folder, "ground_truth.jpg")
+        if not os.path.exists(anno_folder_path):
+            anno_folder_path = os.path.join(root_path, "val", img_folder, "annotation.json")
+            fg_path = os.path.join(root_path, "val", img_folder, "ground_truth.jpg")
+        with open(anno_folder_path, 'r') as f:
+            anno = json.load(f)
+        exam_bbox = anno["inpainted_bboxes"][0]
+        exam_mask_path = anno_folder_path.replace("annotation.json", 'mask_1.png')
+
+        # get img path
+        img_path = os.path.join(img_test_path, file.replace(".json", '.png'))
+        input = {
+            "bg_path": img_path,
+            "fg_path": fg_path,
+            "loc_bbox": loc_bbox,
+            "exam_bbox": exam_bbox,
+            "exam_mask_path": exam_mask_path,
+            "note": img_folder
+        }
+        inputs.append(input)
+    
+    return inputs
+
 
 def prepare_input(batch, model, shape, device, num_samples):
     if num_samples > 1:
@@ -257,13 +262,52 @@ def tensor2numpy(image, normalized=False, image_size=(512, 512)):
     image = (image * 255).astype(np.uint8)
     return image
 
-def save_image(img, img_path):
+def save_image_out(img,  img_path):
     if not isinstance(img, np.ndarray):
         img = np.array(img)
     img  = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     flag = cv2.imwrite(img_path, img)
     if not flag:
         print(img_path, img.shape)
+
+def save_mask_out(mask, size, msk_path):
+    """
+    Args:
+        mask: torch.Tensor (H,W) hoặc (1,H,W) hoặc (B,1,H,W)
+        size: tuple (w, h)
+        msk_path: str
+    """
+
+    # 1 detach + cpu
+    mask = mask.detach().cpu()
+
+    # 2 chuẩn hóa shape → [1,1,H,W]
+    if mask.dim() == 2:          # (H,W)
+        mask = mask.unsqueeze(0).unsqueeze(0)
+    elif mask.dim() == 3:        # (1,H,W)
+        mask = mask.unsqueeze(0)
+    elif mask.dim() == 4:
+        pass
+    else:
+        raise ValueError("Unsupported mask dimension")
+
+    # 3 resize
+    w, h = size
+    mask = F.interpolate(
+        mask.float(),
+        size=(h, w),   # PyTorch dùng (H,W)
+        mode="nearest" # segmentation mask → luôn dùng nearest
+    )
+
+    # 4 về lại shape [1,H,W]
+    mask = mask.squeeze(0)
+
+    # 5 đảm bảo giá trị 0–1
+    if mask.max() > 1:
+        mask = mask / 255.0
+
+    # 6 save
+    save_image(mask, msk_path)
 
 def draw_bbox_on_background(image_nps, norm_bbox, color=(255,215,0), thickness=3):
     dst_list = []
@@ -352,6 +396,11 @@ def argument_parse():
         help="path to checkpoint of model",
     )
     parser.add_argument(
+        "--ckpt_objstit",
+        default="./checkpoints",
+        help="path to checkpoint of model",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=321,
@@ -378,12 +427,14 @@ def generate_image_grid(batch, comp_img):
     grid_img = Image.fromarray(grid_img)
     return grid_img
 
+    
 if __name__ == "__main__":
     opt = argument_parse()
     weight_path = os.path.join(opt.ckpt_dir, "ObjectStitch", "ObjectStitch.pth")
     assert os.path.exists(weight_path), weight_path 
     config      = OmegaConf.load(opt.config)
     clip_path   = os.path.join(opt.ckpt_dir, 'openai-clip-vit-large-patch14')
+
     assert os.path.exists(clip_path), clip_path
     config.model.params.cond_stage_config.params.version = clip_path
     model       = load_model_from_config(config, weight_path)
@@ -405,18 +456,11 @@ if __name__ == "__main__":
         seed_everything(opt.seed)
     start_code = torch.randn([num_samples]+shape, device=device)
     
-    test_list = os.listdir(opt.testdir) #####
-    print(f'find {len(test_list)} pairs of test samples')
-    os.makedirs(opt.outdir, exist_ok=True)
-
-    for img_name in test_list:
-        start = time.time()
-
-        img_folder_path = os.path.join(opt.rootpath, 'test', img_name.split('.')[0])
-        if not os.path.exists(img_folder_path):
-            img_folder_path = os.path.join(opt.rootpath, 'val', img_name.split('.')[0])
-        
-        batch = generate_image_batch(img_folder_path)
+    inputs = get_inputs(opt.testdir, opt.rootpath)
+    print(f'find {len(inputs)} pairs of test samples')
+    for input in tqdm(inputs):
+        img_folder = input["note"]
+        batch = generate_image_batch(input)
 
         # nếu ảnh chỉ có 1 mask, thì next
         if not batch:
@@ -434,9 +478,18 @@ if __name__ == "__main__":
                                         unconditional_conditioning=uc,
                                         test_model_kwargs=test_model_kwargs)
         x_samples_ddim = model.decode_first_stage(samples_ddim[:,:4]).cpu().float()
-        print('inference time: {:.1f}s'.format(time.time() - start))
-        comp_img = tensor2numpy(x_samples_ddim, image_size=img_size)
+        w, h = batch["origin_size"]
+        comp_img = tensor2numpy(x_samples_ddim, image_size=(h,w))
+        comp_img_2 = tensor2numpy(x_samples_ddim, image_size=img_size)
         # save composite results
+        res_img_path = os.path.join(opt.outdir, "img",  f"{img_folder}.png")
+        os.makedirs(os.path.dirname(res_img_path), exist_ok=True)
+        save_image_out(comp_img[-1], res_img_path)
+
+        mask = batch["bg_mask"].squeeze(0)
+        res_msk_path = os.path.join(opt.outdir, "mask",  f"{img_folder}.png")
+        os.makedirs(os.path.dirname(res_msk_path), exist_ok=True)
+        save_mask_out(mask[-1], batch["origin_size"], res_msk_path)
         # for i in range(comp_img.shape[0]):
         #     if i > 0:
         #         res_path = os.path.join(opt.outdir, img_name.split('.')[0] + f'_sample{i}.png')
@@ -444,8 +497,8 @@ if __name__ == "__main__":
         #         res_path = os.path.join(opt.outdir, img_name.split('.')[0] + '.jpg')
         #     save_image(comp_img[i], res_path)
         #     print('save result to {}'.format(res_path))
-        # if not opt.skip_grid:
-        #     grid_img  = generate_image_grid(batch, comp_img)
-        #     grid_path = os.path.join(opt.outdir, img_name.split('.')[0] + f'_grid.jpg')
-        #     save_image(grid_img, grid_path)
-        #     print('save grid_result to {}'.format(grid_path))
+        if not opt.skip_grid:
+            grid_img  = generate_image_grid(batch, comp_img_2)
+            grid_path = os.path.join(opt.outdir, "grid",  f"{img_folder}.jpg")
+            os.makedirs(os.path.dirname(grid_path), exist_ok=True)
+            save_image_out(grid_img, grid_path)

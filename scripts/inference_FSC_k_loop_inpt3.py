@@ -123,8 +123,8 @@ def get_background(bg_path, all_bboxes, loc_bbox, exam_bbox):
     # ---- Lấy các bbox còn lại vẫn nằm trong ảnh cropped image ----
     fit_bboxes = []
     for bbox in all_bboxes:
-        # if bbox != exam_bbox and bbox != loc_bbox:
-        if bbox != loc_bbox:
+        if bbox != exam_bbox and bbox != loc_bbox:
+        # if bbox != loc_bbox:
             b_x1, b_y1, b_x2, b_y2 = bbox
             new_b_x1 = b_x1 - crop_x1
             new_b_y1 = b_y1 - crop_y1
@@ -219,9 +219,9 @@ def get_foreground(fg_path, fg_mask_path, exam_bbox):
 
 def generate_image_batch(img_folder_path, k):
     #bg_path = os.path.join(img_folder_path, 'ground_truth.jpg')
-    bg_path = os.path.join(img_folder_path, 'inpainted_turn_4.png')
+    bg_path = os.path.join(img_folder_path, 'inpainted_turn_3.png')
     fg_path = os.path.join(img_folder_path, 'ground_truth.jpg')
-    fg_mask_path = os.path.join(img_folder_path, 'mask_2.png')
+    fg_mask_path = os.path.join(img_folder_path, 'mask_4.png')
     anno_path = os.path.join(img_folder_path, 'fixed_annotation.json')
     with open(anno_path, 'r') as f:
         anno = json.load(f)
@@ -232,8 +232,8 @@ def generate_image_batch(img_folder_path, k):
     # get location bbox
     loc_bbox = anno["inpainted_bboxes"][0]
     # get examplar bbox
-    exam_bbox = anno["inpainted_bboxes"][1]
-    all_bboxes = anno['inpainted_bboxes']
+    exam_bbox = anno["inpainted_bboxes"][3]
+    all_bboxes = anno['inpainted_bboxes'][:3]
 
     bg_img, bboxes = get_background(bg_path, all_bboxes, loc_bbox, exam_bbox)
     bboxes = get_k_bboxes(bboxes, k) 
